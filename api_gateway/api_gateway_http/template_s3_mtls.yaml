@@ -1,0 +1,36 @@
+Parameters:
+  project:
+    Description: Nombre del proyecto.
+    Type: String
+    Default: example-http-api-gateway
+  environment:
+    Description: Ambiente donde se despliega.
+    Type: String
+    Default: dev
+  applicationcode:
+    Description: Codigo AW de la aplicacion.
+    Type: String
+    Default: n983030
+
+Resources:
+  #### Se crea el Bucket S3 donde se va a cargar el trustore.pem de la validación del mTLS
+  S3BucketMtls:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName:
+        !Join [
+          "-",
+          [!Ref applicationcode, !Ref project, mtls, !Ref environment],
+        ]
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: aws:kms
+      AccessControl: Private
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      VersioningConfiguration:
+        Status: Enabled
