@@ -1,0 +1,143 @@
+AWSTemplateFormatVersion: 2010-09-09
+Description: Simple Books API Gateway and Lambda functions
+
+Parameters:
+  RetrieveBooksLambdaName:
+    Type: String
+    Default: retrieve-books
+  project:
+    Description: Nombre del proyecto.
+    Type: String
+    Default: example-rest-api-gateway
+  environment:
+    Description: Ambiente donde se despliega.
+    Type: String
+    Default: dev
+  applicationcode:
+    Description: Codigo AW de la aplicacion.
+    Type: String
+    Default: code12345
+
+Resources:
+  ####################### Se crea lambda con el codigo a exponer ############################
+  RetrieveBooksLambda:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: !Ref RetrieveBooksLambdaName
+      Handler: index.handler
+      Runtime: nodejs14.x
+      MemorySize: 128
+      Code:
+        ZipFile: |
+          exports.handler = async (event) => {
+            console.info(`Retrieve books lambda event: ${JSON.stringify(event)}`)
+            const response = {
+              body: JSON.stringify([
+                { id: 1, name: 'Monolith to Microservices', author: 'Sam Newman' },
+                { id: 2, name: 'Design It!', author: 'Michael Keeling' },
+                { id: 3, name: 'Programming Kotlin', author: 'Venkat Subramaniam' },
+              ]),
+              statusCode: 200
+            }
+            return response
+          }
+      Role: !GetAtt LambdaRole.Arn
+      Timeout: 30
+
+  LambdaRole:
+    Type: AWS::IAM::Role
+    Properties:
+      Policies:
+        - PolicyName: LambdaPolicy
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              - Action:
+                  - "logs:CreateLogGroup"
+                  - "logs:CreateLogStream"
+                  - "logs:PutLogEvents"
+                Resource:
+                  - "arn:aws:logs:*:*:*"
+                Effect: Allow
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Action:
+              - sts:AssumeRole
+            Effect: Allow
+            Principal:
+              Service:
+                - lambda.amazonaws.com
+
+  ###################### Se crea el Api gateway
+  RestAPI:
+    Type: AWS::ApiGateway::RestApi
+    Properties:
+      Description: Simple Books API
+      Name:
+        !Join ["-", [!Ref applicationcode, !Ref project, !Ref environment, api]]
+      DisableExecuteApiEndpoint: true
+
+  ##################### Deployment Api
+  RestAPIDeployment:
+    Type: AWS::ApiGateway::Deployment
+    DependsOn: RetrieveBooksMethod
+    Properties:
+      RestApiId: !Ref RestAPI
+      StageName: v1
+
+  ############################ Se integra la lambda con el rest api
+  RetrieveBooksMethod:
+    Type: AWS::ApiGateway::Method
+    DependsOn:
+      - RetrieveBooksLambda
+    Properties:
+      AuthorizationType: NONE
+      HttpMethod: GET
+      Integration:
+        IntegrationHttpMethod: POST
+        Type: AWS_PROXY
+        Uri: !Sub arn:aws:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/arn:aws:lambda:${AWS::Region}:${AWS::AccountId}:function:retrieve-books/invocations
+      ResourceId: !GetAtt RestAPI.RootResourceId
+      RestApiId: !Ref RestAPI
+
+  ############################ Permisos para invocar la lambda
+  ApiGatewayInvokePermissionForRetrieveBooks:
+    Type: AWS::Lambda::Permission
+    Properties:
+      Action: lambda:InvokeFunction
+      FunctionName: !GetAtt RetrieveBooksLambda.Arn
+      Principal: apigateway.amazonaws.com
+
+  ########################### Domain name
+  ApiGWCustomDomain:
+    Type: AWS::ApiGateway::DomainName
+    Properties:
+      DomainName: api-gateway-rest.softwaremasters.click
+      CertificateArn: $(arn-certificate) # Reemplace este valor con el arn del certificado de su dominio
+      EndpointConfiguration:
+        Types:
+          - EDGE
+      SecurityPolicy: TLS_1_2
+
+  ###################### Se crea registo Route 53
+  Route53RecordSetGroup:
+    Type: AWS::Route53::RecordSet
+    Properties:
+      Name: api-gateway-rest.softwaremasters.click
+      Type: A
+      HostedZoneId: $(id-zona-alojada) # Reemplace este valor con el id de su zona alojada
+      AliasTarget:
+        DNSName: !GetAtt ApiGWCustomDomain.DistributionDomainName
+        EvaluateTargetHealth: false
+        HostedZoneId: !GetAtt ApiGWCustomDomain.DistributionHostedZoneId
+
+  #################### Se mappea el api con el stage
+  APIMapping:
+    Type: AWS::ApiGateway::BasePathMapping
+    DependsOn: RestAPIDeployment
+    Properties:
+      BasePath: "books"
+      DomainName: !Ref ApiGWCustomDomain
+      RestApiId: !Ref RestAPI
+      Stage: v1

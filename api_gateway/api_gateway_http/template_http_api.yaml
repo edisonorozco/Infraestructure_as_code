@@ -1,0 +1,154 @@
+Parameters:
+  project:
+    Description: Nombre del proyecto.
+    Type: String
+    Default: example-http-api-gateway
+  environment:
+    Description: Ambiente donde se despliega.
+    Type: String
+    Default: dev
+  applicationcode:
+    Description: Codigo AW de la aplicacion.
+    Type: String
+    Default: n983030
+
+Resources:
+  ###################### Se crea el Api gateway
+  HttpApi:
+    Type: AWS::ApiGatewayV2::Api
+    Properties:
+      Name:
+        !Join ["-", [!Ref applicationcode, !Ref project, !Ref environment, api]]
+      Description: Http api gateway.
+      ProtocolType: HTTP
+      DisableExecuteApiEndpoint: true #Desactiva el endpoint por defecto que genera api gateway
+
+  ################### Mapea la api y el stage al dns escogido para exponerle al consumidor
+  HttpApiMapping:
+    Type: AWS::ApiGatewayV2::ApiMapping
+    DependsOn: defaultApiStage
+    Properties:
+      DomainName: !Ref MTLSDomainName
+      ApiId: !Ref HttpApi
+      Stage: !Ref defaultApiStage
+
+  ######### Crea el loggroup en el que se van a guardar los logs del api gateway
+  ApiGatewayLogsGroup:
+    Type: AWS::Logs::LogGroup
+    DependsOn: HttpApi
+    Properties:
+      LogGroupName:
+        !Join [
+          "-",
+          [
+            !Ref applicationcode,
+            !Ref project,
+            !Ref environment,
+            api,
+            log-group,
+          ],
+        ]
+      RetentionInDays: 30
+
+  ################### Se define las configuraciones del stage y el formato de los logs
+  defaultApiStage:
+    Type: AWS::ApiGatewayV2::Stage
+    DependsOn: ApiGatewayLogsGroup
+    Properties:
+      StageName: mtlApigwstage
+      ApiId: !Ref HttpApi
+      AutoDeploy: true
+      DefaultRouteSettings:
+        DetailedMetricsEnabled: true
+      AccessLogSettings:
+        DestinationArn: !GetAtt ApiGatewayLogsGroup.Arn
+        Format: >-
+          {"requestId":"$context.requestId", "ip": "$context.identity.sourceIp",
+          "caller":"$context.identity.caller",
+          "user":"$context.identity.user","requestTime":"$context.requestTime",
+          "routeKey":"$context.routeKey","status":"$context.status",
+          "integrationMessage":"$context.integrationErrorMessage","contextPath":"$context.path"}
+
+  #################### Se crea y configura un nombre de dominio personalizado
+  MTLSDomainName:
+    Type: AWS::ApiGatewayV2::DomainName
+    Properties:
+      DomainName: api-gateway-http.softwaremasters.click
+      #      MutualTlsAuthentication:
+      #        TruststoreUri: "s3://n983030-gestion-informacion-proveedores-mtls-dev/truststore.pem"
+      #        TruststoreVersion: "ekKkarBkaTcNZ5WkyFG4ni9ldbf7zE.t"
+      DomainNameConfigurations:
+        - EndpointType: REGIONAL
+          CertificateArn: $(arn-certificate) # Reemplace este valor con el arn del certificado de su dominio
+          SecurityPolicy: "TLS_1_2"
+
+  DemoRecordSetGroup:
+    Type: AWS::Route53::RecordSetGroup
+    Properties:
+      HostedZoneId: $(id-zona-alojada) # Reemplace este valor con el id de su zona alojada
+      RecordSets:
+        - Name: api-gateway-http.softwaremasters.click
+          Type: A
+          AliasTarget:
+            DNSName: !GetAtt MTLSDomainName.RegionalDomainName
+            HostedZoneId: !GetAtt MTLSDomainName.RegionalHostedZoneId
+
+  ############################################# Lambdas
+  LambdaExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - lambda.amazonaws.com
+            Action:
+              - sts:AssumeRole
+      Path: "/"
+
+  mtlsLambdaFunction:
+    Type: AWS::Lambda::Function
+    DependsOn:
+      - LambdaExecutionRole
+    Properties:
+      FunctionName: mtlsLambdaFunction
+      Role: !GetAtt LambdaExecutionRole.Arn
+      Runtime: python3.7
+      Handler: index.lambda_handler
+      Code:
+        ZipFile: |
+          def lambda_handler(event, context):
+            message = 'Hello Lambda World!'
+            return message
+
+  HelloWordLambdaInvokePermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref mtlsLambdaFunction
+      Action: "lambda:InvokeFunction"
+      Principal: apigateway.amazonaws.com
+
+  ############################ Se integra la lambda con el http api
+  HttpApiIntegration:
+    Type: AWS::ApiGatewayV2::Integration
+    Properties:
+      ApiId: !Ref HttpApi
+      Description: Lambda proxy integration
+      IntegrationType: AWS_PROXY
+      IntegrationMethod: POST
+      PayloadFormatVersion: "2.0"
+      IntegrationUri: !Sub "arn:${AWS::Partition}:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${mtlsLambdaFunction.Arn}/invocations"
+
+  ############################ Ruta
+  HttpApiRoute:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: "GET /hello-world"
+      AuthorizationType: NONE
+      Target: !Join
+        - /
+        - - integrations
+          - !Ref HttpApiIntegration
